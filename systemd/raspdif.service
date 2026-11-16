@@ -1,0 +1,13 @@
+[Unit]
+Description=raspdif Software S/PDIF Output
+After=sound.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'arecord -D hw:Loopback,1,0 -f S16_LE -c 2 -r 48000 -t raw -q | /usr/local/bin/raspdif -r 48000'
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

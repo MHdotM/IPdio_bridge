@@ -1,0 +1,17 @@
+[Unit]
+Description=dnt IPdio mini Frontpanel LCD, Q19/Q18 Backlight PWM & Encoder Bridge
+After=abracadabra.service
+Wants=abracadabra.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/dab-radio
+ExecStart=/usr/bin/python3 /opt/dab-radio/ipdio_bridge.py
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

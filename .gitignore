@@ -1,0 +1,3 @@
+__pycache__/
+*.pyc
+radio_state.json

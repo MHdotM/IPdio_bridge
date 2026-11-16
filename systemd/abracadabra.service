@@ -1,0 +1,25 @@
+[Unit]
+Description=AbracaDABra DAB/DAB+ SDR Empfaenger Daemon (Headless CLI + WebIF)
+After=network.target sound.target udev.service
+Wants=sound.target
+
+[Service]
+Type=simple
+User=root
+Group=audio
+WorkingDirectory=/opt/abracadabra
+ExecStart=/opt/abracadabra/AbracaDABra/build/src/AbracaDABra --cli -d rtlsdr --bind 0.0.0.0 -p 8080 -c 5C --sid 0xE0D230
+
+# Headless-Modus und GStreamer-Backend erzwingen
+Environment="HOME=/root"
+Environment="QT_QPA_PLATFORM=offscreen"
+Environment="QT_MEDIA_BACKEND=gstreamer"
+
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
