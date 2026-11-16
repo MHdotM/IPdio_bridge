@@ -14,5 +14,5 @@ Python 3 basiert, benötigt  https://github.com/MHdotM/AbracaDABra_IPdio
 - Persistente Speicherung von Favoriten & Helligkeit in /opt/dab-radio/radio_state.json
 
 <p align="center" width="100%">
-  <img width="4032" height="3024" alt="IMG_2241" src="https://github.com/user-attachments/assets/c3c35d67-6145-49d3-85fe-bb567cc5a4fa" />
+  <img width="3654" height="2145" alt="IPdio_DAB" src="https://github.com/user-attachments/assets/cbabac69-f888-4da8-ac1a-acdcabed7adb" />
 </p>
