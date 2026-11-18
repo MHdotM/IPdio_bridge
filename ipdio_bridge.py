@@ -345,15 +345,20 @@ class IpdioMiniController:
         # Laufzeit-Zustand (initiale Senderliste aus state oder Fallback)
         self.power_on = True
         self.has_scanned_stations = bool(self.state.get("stations_scanned", False))
-        self.stations = self.state.get("stations") or [
-            {"id": "0xd210", "sid": "0xd210", "scids": 0, "name": "Deutschlandfunk", "channel": "5C"},
-            {"id": "0xd220", "sid": "0xd220", "scids": 0, "name": "Dlf Kultur", "channel": "5C"},
-            {"id": "0xd319", "sid": "0xd319", "scids": 0, "name": "sunshine live", "channel": "5C"},
-            {"id": "0xd418", "sid": "0xd418", "scids": 0, "name": "RADIO BOB!", "channel": "5C"},
-        ]
+        if isinstance(self.state.get("stations"), list):
+            self.stations = self.state.get("stations")
+        else:
+            self.stations = [
+                {"id": "0xd210", "sid": "0xd210", "scids": 0, "name": "Deutschlandfunk", "channel": "5C"},
+                {"id": "0xd220", "sid": "0xd220", "scids": 0, "name": "Dlf Kultur", "channel": "5C"},
+                {"id": "0xd319", "sid": "0xd319", "scids": 0, "name": "sunshine live", "channel": "5C"},
+                {"id": "0xd418", "sid": "0xd418", "scids": 0, "name": "RADIO BOB!", "channel": "5C"},
+            ]
         self.current_station_idx = 0
         self.live_station_name = ""
         self._tuning_hold_until = 0.0
+        self._ens_stable_sig = None
+        self._ens_stable_since = 0.0
         self.browse_idx = 0
         self.current_dls = "dnt IPdio mini - S/PDIF 100% Bit-Perfekt"
         self.show_dab_time = False
@@ -448,6 +453,8 @@ class IpdioMiniController:
         return {}
 
     def _sync_state_from_disk(self):
+        if self.ui_mode in ("scanning", "scan_confirm"):
+            return
         try:
             if not os.path.exists(STATE_FILE):
                 return
@@ -457,9 +464,14 @@ class IpdioMiniController:
             self._state_mtime = mtime
             with open(STATE_FILE, "r") as f:
                 data = json.load(f)
-            if isinstance(data, dict) and isinstance(data.get("stations"), list) and data["stations"]:
+            if isinstance(data, dict) and isinstance(data.get("stations"), list):
                 self.stations = data["stations"]
                 self.has_scanned_stations = bool(data.get("stations_scanned", self.has_scanned_stations))
+                if not self.stations:
+                    self.current_station_idx = 0
+                    self.browse_idx = 0
+                elif self.current_station_idx >= len(self.stations):
+                    self.current_station_idx = 0
                 logging.info(f"Senderliste aus {STATE_FILE} aktualisiert ({len(self.stations)} Sender).")
         except Exception as e:
             logging.debug(f"Sync von {STATE_FILE}: {e}")
@@ -474,11 +486,27 @@ class IpdioMiniController:
                 "stations_scanned": self.has_scanned_stations,
                 "standby_station": self.standby_station,
             }
-            with open(STATE_FILE, "w") as f:
+            tmp_path = STATE_FILE + ".tmp"
+            with open(tmp_path, "w") as f:
                 json.dump(data, f, indent=2)
+            os.replace(tmp_path, STATE_FILE)
             self._state_mtime = os.path.getmtime(STATE_FILE)
         except Exception as e:
             logging.warning(f"Fehler beim Speichern von {STATE_FILE}: {e}")
+
+    @staticmethod
+    def _norm_sid(val):
+        s = str(val or "").strip().lower()
+        if s.isdigit():
+            try:
+                return hex(int(s)).lower()
+            except Exception:
+                return s
+        return s
+
+    @classmethod
+    def _svc_key(cls, ch, sid, scids=0):
+        return f"{str(ch or '').strip().upper()}:{cls._norm_sid(sid)}:{int(scids or 0)}"
 
     def _show_toast(self, line1, line2, duration=1.8):
         self.toast_line1 = line1
@@ -578,9 +606,10 @@ class IpdioMiniController:
 
         if self.ui_mode == "browse":
             # Gewählten Sender aktivieren
-            self.current_station_idx = self.browse_idx
-            st = self.stations[self.current_station_idx]
-            self._tune_station(st)
+            if self.stations and 0 <= self.browse_idx < len(self.stations):
+                self.current_station_idx = self.browse_idx
+                st = self.stations[self.current_station_idx]
+                self._tune_station(st)
             self.ui_mode = "normal"
 
         elif self.ui_mode == "menu":
@@ -589,13 +618,25 @@ class IpdioMiniController:
                 self.dls_scroll_pos = 0
                 self.ui_mode = "station_info"
             elif self.menu_idx == 1:
-                self._start_dab_scan()
+                self.dls_scroll_pos = 0
+                self.ui_mode = "scan_confirm"
             elif self.menu_idx == 2:
                 self.ui_mode = "edit_brightness"
             elif self.menu_idx == 3:
                 self._refresh_wifi_status()
                 self.wifi_menu_idx = 0
                 self.ui_mode = "wifi_menu"
+
+        elif self.ui_mode == "scan_confirm":
+            self.stations = []
+            self.has_scanned_stations = False
+            self.current_station_idx = 0
+            self.browse_idx = 0
+            self.live_station_name = ""
+            self._ens_stable_sig = None
+            self._ens_stable_since = 0.0
+            self._save_state()
+            self._start_dab_scan()
 
         elif self.ui_mode == "station_info":
             self.ui_mode = "menu"
@@ -707,6 +748,7 @@ class IpdioMiniController:
                 "menu",
                 "station_info",
                 "edit_brightness",
+                "scan_confirm",
                 "wifi_menu",
                 "wifi_status",
                 "wifi_scanning",
@@ -722,7 +764,7 @@ class IpdioMiniController:
             if self.ui_mode == "edit_brightness":
                 self._save_state()
                 self.ui_mode = "menu"
-            elif self.ui_mode in ("station_info", "wifi_menu"):
+            elif self.ui_mode in ("station_info", "wifi_menu", "scan_confirm"):
                 self.ui_mode = "menu"
             elif self.ui_mode in ("wifi_status", "wifi_list", "wifi_scanning"):
                 self.ui_mode = "wifi_menu"
@@ -960,9 +1002,15 @@ class IpdioMiniController:
                 self.current_station_idx = 0
                 self._save_state()
                 self._tune_station(self.stations[0])
+                self._show_toast("SUCHLAUF FERTIG", f"{len(self.stations)} Sender", 2.2)
+            else:
+                self.stations = []
+                self.has_scanned_stations = False
+                self.current_station_idx = 0
+                self._save_state()
+                self._show_toast("SUCHLAUF LEER", "0 Sender gef.", 2.2)
             self.scan_progress = 100
             self.ui_mode = "normal"
-            self._show_toast("SUCHLAUF FERTIG", f"{len(self.stations)} Sender", 2.2)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1055,8 +1103,10 @@ class IpdioMiniController:
 
                 # Services aus aktuellem Ensemble synchronisieren (wenn nicht im Suchlauf)
                 svcs = data.get("services")
-                ch = data.get("channel") or self.station_info.get("channel", "5C")
-                if isinstance(svcs, list) and len(svcs) > 0 and self.ui_mode != "scanning":
+                ch = str(data.get("channel") or self.station_info.get("channel", "5C")).strip()
+                sync_level = int(data.get("syncLevel") or 0)
+                ens_valid = isinstance(ens, dict) and bool(ens.get("valid", False))
+                if isinstance(svcs, list) and len(svcs) > 0 and self.ui_mode not in ("scanning", "scan_confirm"):
                     live_services = []
                     for svc in svcs:
                         sid = svc.get("sid") or svc.get("id")
@@ -1071,20 +1121,65 @@ class IpdioMiniController:
                             })
                     if live_services:
                         if not self.has_scanned_stations:
-                            self.stations = live_services
+                            if not os.path.exists(STATE_FILE):
+                                self.stations = live_services
                         else:
-                            existing_keys = {
-                                f"{s.get('channel')}:{str(s.get('sid') or s.get('id')).lower()}"
-                                for s in self.stations
-                            }
-                            added = False
+                            cur_sid_before = None
+                            if 0 <= self.current_station_idx < len(self.stations):
+                                cur_st = self.stations[self.current_station_idx]
+                                cur_sid_before = self._svc_key(cur_st.get("channel"), cur_st.get("sid") or cur_st.get("id"), cur_st.get("scids", 0))
+
+                            by_key = {}
+                            for idx_s, existing in enumerate(self.stations):
+                                k = self._svc_key(existing.get("channel"), existing.get("sid") or existing.get("id"), existing.get("scids", 0))
+                                by_key[k] = idx_s
+
+                            changed = False
+                            live_keys = set()
                             for item in live_services:
-                                k = f"{item['channel']}:{str(item['sid']).lower()}"
-                                if k not in existing_keys:
+                                k = self._svc_key(item["channel"], item["sid"], item["scids"])
+                                live_keys.add(k)
+                                if k not in by_key:
                                     self.stations.append(item)
-                                    added = True
-                            if added:
+                                    changed = True
+                                else:
+                                    ex = self.stations[by_key[k]]
+                                    if (ex.get("name") or "").strip() != item["name"]:
+                                        ex["name"] = item["name"]
+                                        changed = True
+
+                            if sync_level >= 2 and ens_valid:
+                                live_sig = (ch.upper(), tuple(sorted(live_keys)))
+                                if live_sig == self._ens_stable_sig:
+                                    if (time.time() - self._ens_stable_since) >= 6.0:
+                                        kept = []
+                                        for st_item in self.stations:
+                                            st_ch = str(st_item.get("channel") or "").strip().upper()
+                                            st_k = self._svc_key(st_item.get("channel"), st_item.get("sid") or st_item.get("id"), st_item.get("scids", 0))
+                                            if st_ch == ch.upper() and st_k not in live_keys:
+                                                changed = True
+                                                continue
+                                            kept.append(st_item)
+                                        if changed:
+                                            self.stations = kept
+                                else:
+                                    self._ens_stable_sig = live_sig
+                                    self._ens_stable_since = time.time()
+                            else:
+                                self._ens_stable_sig = None
+
+                            if changed:
+                                self.stations.sort(key=lambda x: str(x.get("name") or "").lower())
+                                if cur_sid_before:
+                                    for idx_s, st_item in enumerate(self.stations):
+                                        if self._svc_key(st_item.get("channel"), st_item.get("sid") or st_item.get("id"), st_item.get("scids", 0)) == cur_sid_before:
+                                            self.current_station_idx = idx_s
+                                            break
+                                if self.current_station_idx >= len(self.stations):
+                                    self.current_station_idx = 0
                                 self._save_state()
+                elif sync_level < 2:
+                    self._ens_stable_sig = None
 
                 # Aktuell laufenden Sendernamen (z.B. nach Reboot mit Dlf Nova) auf Zeile 1 synchronisieren
                 if isinstance(cur, dict) and time.time() >= self._tuning_hold_until:
@@ -1105,7 +1200,7 @@ class IpdioMiniController:
                                 break
                         if matched_idx is not None:
                             self.current_station_idx = matched_idx
-                        elif cur_label:
+                        elif cur_label and (self.has_scanned_stations or not os.path.exists(STATE_FILE)):
                             self.stations.append({
                                 "id": cur_sid or cur_label,
                                 "sid": cur.get("sid") or cur_label,
@@ -1113,7 +1208,16 @@ class IpdioMiniController:
                                 "name": cur_label,
                                 "channel": ch,
                             })
-                            self.current_station_idx = len(self.stations) - 1
+                            if self.has_scanned_stations:
+                                self.stations.sort(key=lambda x: str(x.get("name") or "").lower())
+                                target_k = self._svc_key(ch, cur.get("sid") or cur_label, cur_scids)
+                                for idx_s, st_item in enumerate(self.stations):
+                                    if self._svc_key(st_item.get("channel"), st_item.get("sid") or st_item.get("id"), st_item.get("scids", 0)) == target_k:
+                                        self.current_station_idx = idx_s
+                                        break
+                                self._save_state()
+                            else:
+                                self.current_station_idx = len(self.stations) - 1
 
                 # Optionale flache Felder als Fallback
                 if "dls" in data and data["dls"]:
@@ -1394,6 +1498,14 @@ class IpdioMiniController:
             self.lcd.write_line(f"{self.brightness:3d}% [{bar_str}]", 1)
             return
 
+        if self.ui_mode == "scan_confirm":
+            self.lcd.write_line("Sendersuchlauf  ", 0)
+            detail = "Aktuelle Liste wird gelöscht! Weiter?"
+            padded = detail + "   +++   "
+            idx = self.dls_scroll_pos % len(padded)
+            self.lcd.write_line((padded[idx:] + padded[:idx])[:16], 1)
+            return
+
         if self.ui_mode == "scanning":
             bars = int((self.scan_progress / 100.0) * 10)
             bar_str = "=" * bars + "-" * (10 - bars)
@@ -1453,7 +1565,7 @@ class IpdioMiniController:
         # Normaler Wiedergabe-Modus
         if self.live_station_name:
             st_name = self.live_station_name
-        elif self.stations:
+        elif self.stations and 0 <= self.current_station_idx < len(self.stations):
             st_name = self.stations[self.current_station_idx]["name"]
         else:
             st_name = "DAB+ Radio"
